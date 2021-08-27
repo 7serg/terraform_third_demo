@@ -1,0 +1,48 @@
+# AWS_ACCOUNT_ID: "182009040698"
+version: 0.2
+
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: "eu-central-1"
+    ENV: "dev"
+    APP_NAME: "test-nginx"
+    TERRAFORM_VERSION: "1.0.2"
+    IMAGE_REPO_NAME: "nginx-test"
+
+phases:
+  pre_build:
+    commands:
+      - pip install jq
+      - export AWS_ACCOUNT=$(aws sts get-caller-identity |jq -r .Account)
+      - echo Logging into Amazon ECR...
+      - aws ecr get-login-password --region ${AWS_DEFAULT_REGION} | docker login --username AWS --password-stdin ${AWS_ACCOUNT}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com
+      - curl -sSL "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip" -o terraform.zip
+      - unzip terraform.zip -d /usr/local/bin && chmod +x /usr/local/bin/terraform
+      - export REPOSITORY_NAME="${AWS_ACCOUNT}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${IMAGE_REPO_NAME}"
+      - echo "Getting current tag"
+      - export SERVICE_ARN=$(aws ecs list-services --cluster ${APP_NAME}-${ENV}-ECS-Cluster | jq -r .serviceArns[])
+      - export TASKDEF_ARN=$(aws ecs describe-services --cluster ${APP_NAME}-${ENV}-ECS-Cluster --service ${SERVICE_ARN} | jq -r .services[].taskDefinition)
+      - export EXISTING_TAG=$(aws ecs describe-task-definition --task-definition ${TASKDEF_ARN} | jq -r .taskDefinition.containerDefinitions[].image | awk -F ":" '{ print $NF }')
+      - echo "Current version is ${EXISTING_TAG}"
+
+
+  build:
+    commands:
+      - echo Build started on $(date)
+      - echo Building an image
+      - cd "${CODEBUILD_SRC_DIR}/web"
+      - export TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION}"
+      - docker build -t ${IMAGE_REPO_NAME}:${TAG} .
+      - docker tag ${IMAGE_REPO_NAME}:${TAG} ${AWS_ACCOUNT}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${TAG}
+  post_build:
+    commands:
+      - echo Build completed on $(date)
+      - echo Pushing the image....
+      - docker push ${AWS_ACCOUNT}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com/${IMAGE_REPO_NAME}:${TAG}
+      - cd "${CODEBUILD_SRC_DIR}"
+      - terraform init
+      - echo "Terraform has been initialized"
+      - terraform plan -target=module.ecs_cluster -var="image_tag=${TAG}" -no-color -input=false -out plan.out
+      - terraform apply -auto-approve -no-color -input=false plan.out
+      - echo "New code has been deployed"
